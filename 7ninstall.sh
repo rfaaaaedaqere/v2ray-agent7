@@ -2,33 +2,75 @@
 # 检测区
 # -------------------------------------------------------------
 # 检查系统
-checkSystem(){
-	if [[ ! -z `find /etc -name "redhat-release"` ]] || [[ ! -z `cat /proc/version | grep -i "centos" | grep -v grep ` ]]
-	then
-	    centosVersion=`rpm -q centos-release|awk -F "[-]" '{print $3}'|awk -F "[.]" '{print $1}'`
-		release="centos"
-		installType='yum -y install'
-		removeType='yum -y remove'
-		upgrade="yum update -y --skip-broken"
-	elif [[ ! -z `cat /etc/issue | grep -i "debian" | grep -v grep` ]] || [[ ! -z `cat /proc/version | grep -i "debian" | grep -v grep` ]]
-    then
-		release="debian"
-		installType='apt -y install'
-		upgrade="apt update -y"
-		removeType='apt -y autoremove'
-	elif [[ ! -z `cat /etc/issue | grep -i "ubuntu" | grep -v grep` ]] || [[ ! -z `cat /proc/version | grep -i "ubuntu" | grep -v grep` ]]
-	then
-		release="ubuntu"
-		installType='apt -y install'
-		upgrade="apt update -y"
-		removeType='apt --purge remove'
+checkSystem() {
+    if [[ -n $(find /etc -name "redhat-release") ]] || grep </proc/version -q -i "centos"; then
+        mkdir -p /etc/yum.repos.d
+
+        if [[ -f "/etc/centos-release" ]]; then
+            centosVersion=$(rpm -q centos-release | awk -F "[-]" '{print $3}' | awk -F "[.]" '{print $1}')
+
+            if [[ -z "${centosVersion}" ]] && grep </etc/centos-release -q -i "release 8"; then
+                centosVersion=8
+            fi
+        fi
+
+        release="centos"
+        installType='yum -y install'
+        removeType='yum -y remove'
+        upgrade="yum update -y --skip-broken"
+        checkCentosSELinux
+    elif grep </etc/issue -q -i "debian" && [[ -f "/etc/issue" ]] || grep </etc/issue -q -i "debian" && [[ -f "/proc/version" ]]; then
+        release="debian"
+        installType='apt -y install'
+        upgrade="apt update"
+        updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
+        removeType='apt -y autoremove'
+
+    elif grep </etc/issue -q -i "ubuntu" && [[ -f "/etc/issue" ]] || grep </etc/issue -q -i "ubuntu" && [[ -f "/proc/version" ]]; then
+        release="ubuntu"
+        installType='apt -y install'
+        upgrade="apt update"
+        updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
+        removeType='apt -y autoremove'
+        if grep </etc/issue -q -i "16."; then
+            release=
+        fi
     fi
-    if [[ -z ${release} ]]
-    then
-        echoContent red "本脚本不支持此系统，请将下方日志反馈给开发者"
-        cat /etc/issue
-        cat /proc/version
-        exit 0;
+
+    if [[ -z ${release} ]]; then
+        echoContent red "\n本脚本不支持此系统，请将下方日志反馈给开发者\n"
+        echoContent yellow "$(cat /etc/issue)"
+        echoContent yellow "$(cat /proc/version)"
+        exit 0
+    fi
+}
+
+# 检查CPU提供商
+checkCPUVendor() {
+    if [[ -n $(which uname) ]]; then
+        if [[ "$(uname)" == "Linux" ]]; then
+            case "$(uname -m)" in
+            'amd64' | 'x86_64')
+                xrayCoreCPUVendor="Xray-linux-64"
+                v2rayCoreCPUVendor="v2ray-linux-64"
+                warpRegCoreCPUVendor="main-linux-amd64"
+                ;;
+            'armv8' | 'aarch64')
+                cpuVendor="arm"
+                xrayCoreCPUVendor="Xray-linux-arm64-v8a"
+                v2rayCoreCPUVendor="v2ray-linux-arm64-v8a"
+                warpRegCoreCPUVendor="main-linux-arm64"
+                ;;
+            *)
+                echo "  不支持此CPU架构--->"
+                exit 1
+                ;;
+            esac
+        fi
+    else
+        echoContent red "  无法识别此CPU架构，默认amd64、x86_64--->"
+        xrayCoreCPUVendor="Xray-linux-64"
+        v2rayCoreCPUVendor="v2ray-linux-64"
     fi
 }
 
@@ -38,6 +80,12 @@ initVar(){
     removeType='yum -y remove'
     upgrade="yum -y update"
     echoType='echo -e'
+    
+    # 核心支持的cpu版本
+    xrayCoreCPUVendor=""
+    v2rayCoreCPUVendor=""
+    warpRegCoreCPUVendor=""
+    cpuVendor=""
 
     # 域名
     domain=
@@ -259,6 +307,7 @@ cleanUp(){
 
 initVar
 checkSystem
+checkCPUVendor
 readInstallType
 readCustomInstallType
 readConfigHostPathUUID
@@ -310,6 +359,13 @@ mkdirTools(){
 # 安装工具包
 installTools(){
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装工具"
+    
+    if [[ -n $(pgrep -f "apt") ]]; then
+        pgrep -f apt | xargs kill -9
+    fi
+    
+    echoContent green " ---> 检查、安装更新【新机器会很慢，耐心等待】"
+    
     if [[ "${release}" = "centos" ]]
     then
         echoContent green " ---> 检查安装jq、nginx epel源、yum-utils"
@@ -352,20 +408,14 @@ installTools(){
         fi
 
     fi
+    
     # 修复ubuntu个别系统问题
     if [[ "${release}" = "ubuntu" ]]
     then
         dpkg --configure -a
     fi
 
-    if [[ ! -z `ps -ef|grep -v grep|grep apt`  ]]
-    then
-        ps -ef|grep -v grep|grep apt|awk '{print $2}'|xargs kill -9
-    fi
-
-    echoContent green " ---> 检查、安装更新【新机器会很慢，耐心等待】"
-
-    ${upgrade} > /dev/null
+    ${upgrade} >/etc/v2ray-agent/install.log 2>&1
     if [[ "${release}" = "centos" ]]
     then
         rm -rf /var/run/yum.pid
@@ -374,31 +424,31 @@ installTools(){
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w wget` ]]
     then
         echoContent green " ---> 安装wget"
-        ${installType} wget > /dev/null
+        ${installType} wget >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w curl` ]]
     then
         echoContent green " ---> 安装curl"
-        ${installType} curl > /dev/null
+        ${installType} curl >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w unzip` ]]
     then
         echoContent green " ---> 安装unzip"
-        ${installType} unzip > /dev/null
+        ${installType} unzip >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w socat` ]]
     then
         echoContent green " ---> 安装socat"
-        ${installType} socat > /dev/null
+        ${installType} socat >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w tar` ]]
     then
         echoContent green " ---> 安装tar"
-        ${installType} tar > /dev/null
+        ${installType} tar >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep cron` ]]
@@ -406,63 +456,61 @@ installTools(){
         echoContent green " ---> 安装crontabs"
         if [[ "${release}" = "ubuntu" ]] || [[ "${release}" = "debian" ]]
         then
-            ${installType} cron > /dev/null
+            ${installType} cron >/dev/null 2>&1
         else
-            ${installType} crontabs > /dev/null
+            ${installType} crontabs >/dev/null 2>&1
         fi
     fi
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w jq` ]]
     then
         echoContent green " ---> 安装jq"
-        ${installType} jq > /dev/null
+        ${installType} jq >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep binutils` ]]
     then
         echoContent green " ---> 安装binutils"
-        ${installType} binutils > /dev/null  2>&1
+        ${installType} binutils >/dev/null 2>&1
     fi
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w nginx` ]]
     then
         echoContent green " ---> 安装nginx"
-        ${installType} nginx > /dev/null
+        ${installType} nginx >/dev/null 2>&1
     fi
 
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w sudo` ]]
     then
         echoContent green " ---> 安装sudo"
-        ${installType} sudo > /dev/null
+        ${installType} sudo >/dev/null 2>&1
+    fi
+    
+    if ! find /usr/bin /usr/sbin | grep -q -w lsb-release; then
+        echoContent green " ---> 安装lsb-release"
+        ${installType} lsb-release >/dev/null 2>&1
+    fi
+
+    if ! find /usr/bin /usr/sbin | grep -q -w lsof; then
+        echoContent green " ---> 安装lsof"
+        ${installType} lsof >/dev/null 2>&1
     fi
     # todo 关闭防火墙
+    
+    if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
+        echoContent green " ---> 安装acme.sh"
+        curl -s https://get.acme.sh | sh >/etc/v2ray-agent/tls/acme.log 2>&1
 
-    if [[ ! -d "/root/.acme.sh" ]]
-    then
-        echoContent green " ---> 安装acme.sh"
-        curl -s https://get.acme.sh | sh > /etc/v2ray-agent/tls/acme.log
-        if [[ -d "~/.acme.sh" ]] && [[ -z `ls -F ~/.acme.sh/|grep -w "acme.sh"` ]]
-        then
+        if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
             echoContent red "  acme安装失败--->"
-            echoContent yellow "错误排查："
-            echoContent red "  1.获取Github文件失败，请等待GitHub恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
+            tail -n 100 /etc/v2ray-agent/tls/acme.log
+            echoContent yellow "错误排查:"
+            echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
             echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
-            echoContent red "  3.反馈给开发者[私聊：https://t.me/mack_a] 或 [提issues]"
+            echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
+            echoContent skyBlue "  echo -e \"nameserver 2001:67c:2b0::4\\\nnameserver 2a00:1098:2c::1\" >> /etc/resolv.conf"
             exit 0
         fi
     fi
-    if [[ -d "/root/.acme.sh" ]] && [[ -z `find /root/.acme.sh/ -name "acme.sh"` ]]
-    then
-        echoContent green " ---> 安装acme.sh"
-        curl -s https://get.acme.sh | sh > /etc/v2ray-agent/tls/acme.log
-        if [[ -d "~/.acme.sh" ]] && [[ -z `find /root/.acme.sh/ -name "acme.sh"` ]]
-        then
-            echoContent red "  acme安装失败--->"
-            echoContent yellow "错误排查："
-            echoContent red "  1.获取Github文件失败，请等待GitHub恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
-            echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
-            echoContent red "  3.反馈给开发者[私聊：https://t.me/mack_a] 或 [提issues]"
-            exit 0
-        fi
-    fi
+
 }
 
 # 初始化Nginx申请证书配置
@@ -471,8 +519,7 @@ initTLSNginxConfig(){
     echoContent skyBlue "\n进度  $1/${totalProgress} : 初始化Nginx申请证书配置"
     echoContent yellow  "请输入要配置的域名 例：blog.v2ray-agent.com --->"
     read -p "域名:" domain
-    if [[ -z ${domain} ]]
-    then
+    if [[ -z ${domain} ]]; then
         echoContent red "  域名不可为空--->"
         initTLSNginxConfig
     else
@@ -480,15 +527,26 @@ initTLSNginxConfig(){
         echoContent green " ---> 配置Nginx"
         touch /etc/nginx/conf.d/alone.conf
         echo "server {listen 80;server_name ${domain};root /usr/share/nginx/html;location ~ /.well-known {allow all;}location /test {return 200 'fjkvymb6len';}}" > /etc/nginx/conf.d/alone.conf
+        # 检查日志，解决nginx启动失败
+        if [[ ! -f /var/log/nginx/access.log ]]; then
+            if [[ ! -d /var/log/nginx ]]; then
+                mkdir /var/log/nginx
+            fi
+            
+            touch /var/log/nginx/access.log
+            touch /var/log/nginx/error.log
+        fi
+        
         # 启动nginx
         handleNginx start
         echoContent yellow "\n检查IP是否设置为当前VPS"
-        # checkIP
+        #checkIP
+        
         # 测试nginx
         echoContent yellow "\n检查Nginx是否正常访问"
         # domainResult=`curl -s ${domain}/test|grep fjkvymb6len`
         domainResult=1
-        if [[ ! -z ${domainResult} ]]
+        if [[ -n ${domainResult} ]]
         then
             handleNginx stop
             echoContent green " ---> Nginx配置成功"
@@ -501,7 +559,8 @@ initTLSNginxConfig(){
 
 # 检查ip
 checkIP(){
-    pingIP=`ping -c 1 -W 1000 ${domain}|sed '1{s/[^(]*(//;s/).*//;q;}'`
+    # pingIP=`ping -c 1 -W 1000 ${domain}|sed '1{s/[^(]*(//;s/).*//;q;}'`
+    pingIP=$(curl -s -m 2 "http://${domain}:443/ip")
     if [[ ! -z "${pingIP}" ]] && [[ `echo ${pingIP}|grep '^\([1-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)$'` ]]
     then
         read -p "当前域名的IP为 [${pingIP}]，是否正确[y/n]？" domainStatus
@@ -526,12 +585,15 @@ checkIP(){
 # 安装TLS
 installTLS(){
     echoContent skyBlue "\n进度  $1/${totalProgress} : 申请TLS证书"
+    
+    # 增加关闭 nginx， 解决证书申请失败
+    handleNginx stop
     if [[ -z `ls /etc/v2ray-agent/tls|grep ${domain}.crt` ]] && [[ -z `ls /etc/v2ray-agent/tls|grep ${domain}.key` ]]
     then
         echoContent green " ---> 安装TLS证书"
 
-        sudo ~/.acme.sh/acme.sh --issue -d ${domain} --standalone -k ec-256 >/dev/null
-        ~/.acme.sh/acme.sh --installcert -d ${domain} --fullchainpath /etc/v2ray-agent/tls/${domain}.crt --keypath /etc/v2ray-agent/tls/${domain}.key --ecc >/dev/null
+        sudo "$HOME/.acme.sh/acme.sh" --issue -d ${domain} --standalone -k ec-256 --server "letsencrypt" >/dev/null
+        sudo "$HOME/.acme.sh/acme.sh" --installcert -d ${domain} --fullchainpath /etc/v2ray-agent/tls/${domain}.crt --keypath /etc/v2ray-agent/tls/${domain}.key --ecc >/dev/null
         if [[ -z `cat /etc/v2ray-agent/tls/${domain}.crt` ]]
         then
             echoContent red " ---> TLS安装失败，请检查acme日志"
@@ -607,44 +669,59 @@ nginxBlog(){
 #    echoContent yellow "添加伪装博客--->"
     echoContent skyBlue "\n进度 $1/${totalProgress} : 添加伪装博客"
     if [[ -d "/usr/share/nginx/html" && -f "/usr/share/nginx/html/check" ]]
-    then
-        read -p "检测到安装伪装博客，是否需要重新安装[y/n]：" nginxBlogInstallStatus
-        if [[ "${nginxBlogInstallStatus}" = "y" ]]
-        then
-            rm -rf /usr/share/nginx/html
-            wget -q -P /usr/share/nginx https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html.zip > /dev/null
-            unzip -o  /usr/share/nginx/html.zip -d /usr/share/nginx/html > /dev/null
-            rm -f /usr/share/nginx/html.zip*
-            echoContent green " ---> 添加伪装博客成功"
-        fi
+    then; echo
+        # read -p "检测到安装伪装博客，是否需要重新安装[y/n]：" nginxBlogInstallStatus
+        # if [[ "${nginxBlogInstallStatus}" = "y" ]]
+        # then
+            # rm -rf /usr/share/nginx/html
+            # randomNum=$((RANDOM % 6 + 1))
+            # wget -q -P /usr/share/nginx https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip > /dev/null
+            # unzip -o  "/usr/share/nginx/html${randomNum}.zip" -d /usr/share/nginx/html > /dev/null
+            # rm -f "/usr/share/nginx/html${randomNum}.zip*"
+            # echoContent green " ---> 添加伪装博客成功"
+        # fi
     else
+        randomNum=$((RANDOM % 6 + 1))
         rm -rf /usr/share/nginx/html
-        wget -q -P /usr/share/nginx https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html.zip > /dev/null
-        unzip -o  /usr/share/nginx/html.zip -d /usr/share/nginx/html > /dev/null
-        rm -f /usr/share/nginx/html.zip*
+        wget -q -P /usr/share/nginx https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip > /dev/null
+        unzip -o  "/usr/share/nginx/html${randomNum}.zip" -d /usr/share/nginx/html > /dev/null
+        rm -f "/usr/share/nginx/html${randomNum}.zip*"
         echoContent green " ---> 添加伪装博客成功"
     fi
 
 }
 # 操作Nginx
 handleNginx(){
-    if [[ -z `ps -ef|grep -v grep|grep nginx` ]] && [[ "$1" = "start" ]]
-    then
-        nginx
+    if [[ -z $(pgrep -f "nginx") ]] && [[ "$1" == "start" ]]; then
+        systemctl start nginx 2>/etc/v2ray-agent/nginx_error.log
+
         sleep 0.5
-        if [[ -z `ps -ef|grep -v grep|grep nginx` ]]
-        then
-            echoContent red " ---> Nginx启动失败，请检查日志"
+
+        if [[ -z $(pgrep -f "nginx") ]]; then
+            echoContent red " ---> Nginx启动失败"
+            echoContent red " ---> 请手动尝试安装nginx后，再次执行脚本"
+
+            # if grep -q "journalctl -xe" </etc/v2ray-agent/nginx_error.log; then
+                # updateSELinuxHTTPPortT
+            # fi
+
             exit 0
+        else
+            echoContent green " ---> Nginx启动成功"
         fi
-    elif [[  "$1" = "stop" ]] && [[ ! -z `ps -ef|grep -v grep|grep nginx` ]]
-    then
-        nginx -s stop > /dev/null 2>&1
+
+    elif [[ -n $(pgrep -f "nginx") ]] && [[ "$1" == "stop" ]]; then
+        systemctl stop nginx
         sleep 0.5
-        if [[ ! -z `ps -ef|grep -v grep|grep nginx` ]]
-        then
-            ps -ef|grep -v grep|grep nginx|awk '{print $2}'|xargs kill -9
+        if [[ -n $(pgrep -f "nginx") ]]; then
+            pgrep -f "nginx" | xargs kill -9
         fi
+        
+        if [[ -n $(pgrep -f "nginx") ]]; then
+            nginx -s stop
+        fi
+        
+        echoContent green " ---> Nginx关闭成功"
     fi
 }
 
@@ -831,7 +908,7 @@ installV2Ray(){
     then
         if [[ "${selectCoreType}" = "2" ]]
         then
-            version=`curl -s https://github.com/v2fly/v2ray-core/releases|grep /v2ray-core/releases/tag/|head -1|awk -F "[/]" '{print $6}'|awk -F "[>]" '{print $2}'|awk -F "[<]" '{print $1}'`
+            version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -1)
         else
             version=${v2rayCoreVersion}
         fi
@@ -839,13 +916,13 @@ installV2Ray(){
         echoContent green " ---> v2ray-core版本:${version}"
         if [[ ! -z `wget --help|grep show-progress` ]]
         then
-            wget -c -q --show-progress -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+            wget -c -q --show-progress -P /etc/v2ray-agent/v2ray/ "https://github.com/v2fly/v2ray-core/releases/download/${version}/${v2rayCoreCPUVendor}.zip"
         else
-            wget -c -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip > /dev/null 2>&1
+            wget -c -P /etc/v2ray-agent/v2ray/ "https://github.com/v2fly/v2ray-core/releases/download/${version}/${v2rayCoreCPUVendor}.zip" > /dev/null 2>&1
         fi
 
-        unzip -o /etc/v2ray-agent/v2ray/v2ray-linux-64.zip -d /etc/v2ray-agent/v2ray > /dev/null
-        rm -rf /etc/v2ray-agent/v2ray/v2ray-linux-64.zip
+        unzip -o "/etc/v2ray-agent/v2ray/${v2rayCoreCPUVendor}.zip" -d /etc/v2ray-agent/v2ray > /dev/null
+        rm -rf "/etc/v2ray-agent/v2ray/${v2rayCoreCPUVendor}.zip"
     else
         if [[ "${selectCoreType}" = "3" ]]
         then
@@ -876,21 +953,26 @@ installXray(){
         ps -ef|grep -v grep|grep xray|awk '{print $8}'|xargs rm -f
         ps -ef|grep -v grep|grep xray|awk '{print $2}'|xargs kill -9 > /dev/null 2>&1
     fi
+    
+    # 使用稳定版
+    local prereleaseStatus=false
 
     if [[ "${coreInstallType}" != "1" ]]
     then
-        version=`curl -s https://github.com/XTLS/Xray-core/releases|grep /XTLS/Xray-core/releases/tag/|head -1|awk '{print $3}'|awk -F "[<]" '{print $1}'`
+        version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[]|select (.prerelease=='${prereleaseStatus}')|.tag_name' | head -1)
+        
+        # version=`curl -s https://github.com/XTLS/Xray-core/releases|grep /XTLS/Xray-core/releases/tag/|head -1|awk '{print $3}'|awk -F "[<]" '{print $1}'`
 
         echoContent green " ---> Xray-core版本:${version}"
         if [[ ! -z `wget --help|grep show-progress` ]]
         then
-            wget -c -q --show-progress -P /etc/v2ray-agent/xray/ https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-64.zip
+            wget -c -q --show-progress -P /etc/v2ray-agent/xray/ https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip > /dev/null 2>&1
         else
-            wget -c -P /etc/v2ray-agent/xray/ https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-64.zip > /dev/null 2>&1
+            wget -c -P /etc/v2ray-agent/xray/ https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip > /dev/null 2>&1
         fi
 
-        unzip -o /etc/v2ray-agent/xray/Xray-linux-64.zip -d /etc/v2ray-agent/xray > /dev/null
-        rm -rf /etc/v2ray-agent/xray/Xray-linux-64.zip
+        unzip -o /etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip -d /etc/v2ray-agent/xray > /dev/null
+        rm -rf /etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip
         chmod 655 /etc/v2ray-agent/xray/xray
     else
         echoContent green " ---> Xray-core版本:`/etc/v2ray-agent/xray/xray --version|awk '{print $2}'|head -1`"
@@ -1347,40 +1429,64 @@ EOF
 }
 # 操作V2Ray
 handleV2Ray(){
-    if [[ ! -z `find /bin /usr/bin -name "systemctl"` ]] && [[ ! -z `ls /etc/systemd/system/|grep -v grep|grep v2ray.service` ]]
-    then
-        if [[ -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]] && [[ "$1" = "start" ]]
-        then
+    
+    # 修复v2ray启动失败
+    local v2ray_access_log=/etc/v2ray-agent/v2ray/v2ray_access.log
+    local v2ray_error_log=/etc/v2ray-agent/v2ray/v2ray_error.log
+    
+
+    if [[ ! -z `find /bin /usr/bin -name "systemctl"` ]] && [[ ! -z `ls /etc/systemd/system/|grep -v grep|grep v2ray.service` ]]; then
+        if [[ -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]] && [[ "$1" = "start" ]]; then
+            
+            if [[ -f $v2ray_access_log ]]; then
+            
+                while true
+                do
+                    echoContent yellow "\n --> 正在取消 $v2ray_access_log 只读属性"
+                    sudo chattr -i $v2ray_access_log
+                    sudo chattr -i $v2ray_error_log
+                    
+                    sleep 0.5
+                    
+                    if lsattr $v2ray_access_log | grep '\-i'; then
+                        sleep 1
+                        continue
+                    else
+                        echoContent yellow "\n --> 已取消 $v2ray_access_log 只读属性"
+                        echo >$v2ray_access_log
+                        echo >$v2ray_error_log
+                        break
+                    fi
+                done                
+            fi
+            
             systemctl start v2ray.service
-        elif [[ ! -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]] && [[ "$1" = "stop" ]]
-        then
+            
+        elif [[ ! -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]] && [[ "$1" = "stop" ]]; then
             systemctl stop v2ray.service
         fi
-    elif [[ -z `find /bin /usr/bin -name "systemctl"` ]]
-    then
-        if [[ -z `ps -ef|grep -v grep|grep v2ray` ]] && [[ "$1" = "start" ]]
-        then
+    elif [[ -z `find /bin /usr/bin -name "systemctl"` ]]; then
+        if [[ -z `ps -ef|grep -v grep|grep v2ray` ]] && [[ "$1" = "start" ]]; then
             /usr/bin/v2ray/v2ray -config /etc/v2ray-agent/v2ray/config_full.json & > /dev/null 2>&1
-        elif [[ ! -z `ps -ef|grep -v grep|grep v2ray` ]] && [[ "$1" = "stop" ]]
-        then
+        elif [[ ! -z `ps -ef|grep -v grep|grep v2ray` ]] && [[ "$1" = "stop" ]]; then
             ps -ef|grep -v grep|grep v2ray|awk '{print $2}'|xargs kill -9
         fi
     fi
+    
     sleep 0.5
-    if [[ "$1" = "start" ]]
-    then
-        if [[ ! -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]]
-        then
+    if [[ "$1" = "start" ]]; then
+        if [[ ! -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]]; then
             echoContent green " ---> V2Ray启动成功"
+            echoContent yellow "\n --> 已恢复 $v2ray_access_log 只读属性"
+            sudo chattr +i $v2ray_access_log 
+            sudo chattr +i $v2ray_error_log 
         else
             echoContent red "V2Ray启动失败"
             echoContent red "执行 [ps -ef|grep v2ray] 查看日志"
             exit 0;
         fi
-    elif [[ "$1" = "stop" ]]
-    then
-        if [[ -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]]
-        then
+    elif [[ "$1" = "stop" ]]; then
+        if [[ -z `ps -ef|grep -v grep|grep "v2ray/v2ray"` ]]; then
             echoContent green " ---> V2Ray关闭成功"
         else
             echoContent red "V2Ray关闭失败"
@@ -1391,38 +1497,62 @@ handleV2Ray(){
 }
 # 操作xray
 handleXray(){
-    if [[ ! -z `find /bin /usr/bin -name "systemctl"` ]] && [[ ! -z `ls /etc/systemd/system/|grep -v grep|grep xray.service` ]]
-    then
-        if [[ -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "start" ]]
-        then
+
+    # 修复xray启动失败
+    local xray_access_log=/etc/v2ray-agent/xray/xray_access.log
+    local xray_error_log=/etc/v2ray-agent/xray/xray_error.log
+    
+    if [[ ! -z `find /bin /usr/bin -name "systemctl"` ]] && [[ ! -z `ls /etc/systemd/system/|grep -v grep|grep xray.service` ]]; then
+        if [[ -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "start" ]]; then
+            
+            if [[ -f $xray_access_log ]]; then
+            
+                while true
+                do
+                    echoContent yellow "\n --> 正在取消 $v2ray_access_log 只读属性"
+                    sudo chattr -i $xray_access_log
+                    sudo chattr -i $xray_error_log
+                    
+                    sleep 0.5
+                    
+                    if lsattr $xray_access_log | grep '\-i'; then
+                        sleep 1
+                        continue
+                    else
+                        echoContent yellow "\n --> 已取消 $xray_access_log 只读属性"
+                        echo >$xray_access_log
+                        echo >$xray_error_log
+                        break
+                    fi
+                done                
+            fi
+        
             systemctl start xray.service
-        elif [[ ! -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "stop" ]]
-        then
+        elif [[ ! -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "stop" ]]; then
             systemctl stop xray.service
         fi
-    elif [[ -z `find /bin /usr/bin -name "systemctl"` ]]
-    then
-        if [[ -z `ps -ef|grep -v grep|grep xray` ]] && [[ "$1" = "start" ]]
-        then
+    elif [[ -z `find /bin /usr/bin -name "systemctl"` ]]; then
+        if [[ -z `ps -ef|grep -v grep|grep xray` ]] && [[ "$1" = "start" ]]; then
             /usr/bin/xray/xray -config /etc/v2ray-agent/xray/config_full.json & > /dev/null 2>&1
-        elif [[ ! -z `ps -ef|grep -v grep|grep xray` ]] && [[ "$1" = "stop" ]]
-        then
+        elif [[ ! -z `ps -ef|grep -v grep|grep xray` ]] && [[ "$1" = "stop" ]]; then
             ps -ef|grep -v grep|grep xray|awk '{print $2}'|xargs kill -9
         fi
     fi
+    
     sleep 0.5
-    if [[ "$1" = "start" ]]
-    then
+    if [[ "$1" = "start" ]]; then
         if [[ ! -z `ps -ef|grep -v grep|grep "xray/xray"` ]]
         then
             echoContent green " ---> Xray启动成功"
+            echoContent yellow "\n --> 已恢复 $xray_access_log 只读属性"
+            sudo chattr +i $xray_access_log 
+            sudo chattr +i $xray_error_log 
         else
             echoContent red "xray启动失败"
             echoContent red "执行 [ps -ef|grep xray] 查看日志"
             exit 0;
         fi
-    elif [[ "$1" = "stop" ]]
-    then
+    elif [[ "$1" = "stop" ]]; then
         if [[ -z `ps -ef|grep -v grep|grep "xray/xray"` ]]
         then
             echoContent green " ---> Xray关闭成功"
@@ -1521,9 +1651,9 @@ initV2RayConfig(){
         cat << EOF > /etc/v2ray-agent/v2ray/config_full.json
 {
   "log": {
-    "access": "/etc/v2ray-agent/v2ray/v2ray_access.log",
-    "error": "/etc/v2ray-agent/v2ray/v2ray_error.log",
-    "loglevel": "debug"
+    "access": "/dev/null",
+    "error": "/dev/null",
+    "loglevel": "none"
   },
   "inbounds": [
     {
@@ -1583,9 +1713,8 @@ initV2RayConfig(){
         "clients": [
           {
             "id": "${uuid}",
-            "alterId": 1,
-            "level": 0,
-            "email": "${domain}_vmess_ws"
+            "email": "${domain}_vmess_ws",
+            "alterId": 0
           }
         ]
       },
@@ -1636,7 +1765,6 @@ initV2RayConfig(){
         "clients": [
           {
             "id": "${uuid}",
-            "level": 0,
             "email": "${domain}_vless_ws"
           }
         ],
@@ -2151,12 +2279,12 @@ initXrayConfig(){
     if [[ ! -z "${currentUUID}" ]]
     then
         echo
-        read -p "读取到上次安装记录，是否使用上次安装时的UUID ？[y/n]:" historyUUIDStatus
-        if [[ "${historyUUIDStatus}" = "y" ]]
-        then
-            uuid=${currentUUID}
-            uuidDirect=${currentUUIDDirect}
-        fi
+        # read -p "读取到上次安装记录，是否使用上次安装时的UUID ？[y/n]:" historyUUIDStatus
+        # if [[ "${historyUUIDStatus}" = "y" ]]
+        # then
+            # uuid=${currentUUID}
+            # uuidDirect=${currentUUIDDirect}
+        # fi
     else
         uuid=`/etc/v2ray-agent/xray/xray uuid`
         uuidDirect=`/etc/v2ray-agent/xray/xray uuid`
@@ -2189,9 +2317,9 @@ initXrayConfig(){
         cat << EOF > /etc/v2ray-agent/xray/config_full.json
 {
   "log": {
-    "access": "/etc/v2ray-agent/xray/xray_access.log",
-    "error": "/etc/v2ray-agent/xray/xray_error.log",
-    "loglevel": "debug"
+    "access": "/dev/null",
+    "error": "/dev/null",
+    "loglevel": "none"
   },
   "inbounds": [
     {
@@ -2201,14 +2329,8 @@ initXrayConfig(){
         "clients": [
           {
             "id": "${uuid}",
-            "add": "${add}",
-            "flow":"xtls-rprx-origin",
-            "email": "${domain}_VLESS_XTLS/TLS-origin_TCP"
-          },
-          {
-            "id": "${uuidDirect}",
-            "flow":"xtls-rprx-direct",
-            "email": "${domain}_VLESS_XTLS/TLS-direct_TCP"
+            "flow":"xtls-rprx-vision",
+            "email": "${domain}-VLESS_TCP/TLS_Vision"
           }
         ],
         "decryption": "none",
@@ -2236,15 +2358,19 @@ initXrayConfig(){
       },
       "streamSettings": {
         "network": "tcp",
-        "security": "xtls",
-        "xtlsSettings": {
+        "security": "tls",
+        "tlsSettings": {
+          "minVersion": "1.2",
           "alpn": [
-            "http/1.1"
+            "http/1.1",
+            "h2"
           ],
           "certificates": [
             {
               "certificateFile": "/etc/v2ray-agent/tls/${domain}.crt",
-              "keyFile": "/etc/v2ray-agent/tls/${domain}.key"
+              "keyFile": "/etc/v2ray-agent/tls/${domain}.key",
+              "ocspStapling": 3600,
+              "usage": "encipherment"
             }
           ]
         }
@@ -2257,9 +2383,8 @@ initXrayConfig(){
         "clients": [
           {
             "id": "${uuid}",
-            "alterId": 1,
-            "level": 0,
-            "email": "${domain}_vmess_ws"
+            "email": "${domain}_vmess_ws",
+            "alterId": 0
           }
         ]
       },
@@ -2310,7 +2435,6 @@ initXrayConfig(){
         "clients": [
           {
             "id": "${uuid}",
-            "level": 0,
             "email": "${domain}_vless_ws"
           }
         ],
@@ -2623,7 +2747,7 @@ initTrojanGoConfig(){
     "remote_addr": "127.0.0.1",
     "remote_port": 80,
     "log_level":0,
-    "log_file":"/etc/v2ray-agent/trojan/trojan.log",
+    "log_file":"/dev/null",
     "password": [
         "${uuid}"
     ],
@@ -2733,7 +2857,7 @@ defaultBase64Code(){
         qrCodeBase64Default=`echo -n '{"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"1","v":"2","host":"'${host}'","type":"none","path":'${path}',"net":"ws","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'"}'|sed 's#/#\\\/#g'|base64`
         qrCodeBase64Default=`echo ${qrCodeBase64Default}|sed 's/ //g'`
         echoContent yellow " ---> 通用json(VMess+WS+TLS)"
-        echoContent green '    {"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"1","v":"2","host":"'${host}'","type":"none","path":'${path}',"net":"ws","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'"}\n'
+        echoContent green '    {"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"0","v":"2","host":"'${host}'","type":"none","path":'${path}',"net":"ws","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'"}\n'
         echoContent yellow " ---> 通用vmess(VMess+WS+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
@@ -2744,7 +2868,7 @@ defaultBase64Code(){
         qrCodeBase64Default=`echo -n '{"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"1","v":"2","host":"'${host}'","type":"http","path":'${path}',"net":"tcp","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'","obfs":"http","obfsParam":"'${host}'"}'|sed 's#/#\\\/#g'|base64`
         qrCodeBase64Default=`echo ${qrCodeBase64Default}|sed 's/ //g'`
         echoContent yellow " ---> 通用json(VMess+TCP+TLS)"
-        echoContent green '    {"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"1","v":"2","host":"'${host}'","type":"http","path":'${path}',"net":"tcp","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'","obfs":"http","obfsParam":"'${host}'"}\n'
+        echoContent green '    {"port":"'${port}'","ps":"'${ps}'","tls":"tls","id":'"${id}"',"aid":"0","v":"2","host":"'${host}'","type":"http","path":'${path}',"net":"tcp","add":"'${add}'","allowInsecure":0,"method":"none","peer":"'${host}'","obfs":"http","obfsParam":"'${host}'"}\n'
         echoContent yellow " ---> 通用vmess(VMess+TCP+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+TCP+TLS)"
@@ -2827,28 +2951,28 @@ showAccounts(){
         local vmessTCPEmail="`echo ${vmessTCP}|jq .settings.clients[0].email|awk -F '["]' '{print $2}'`"
         local vmessTCPath=`echo ${vmessTCP}|jq .streamSettings.tcpSettings.header.request.path[0]`
 
-        if [[ "${coreInstallType}" = "3" || "${coreInstallType}" = "1" ]]
-        then
-            echoContent skyBlue "\n============================ VLESS TCP TLS/XTLS-origin ==========================="
-            defaultBase64Code vlesstcp ${tcpEmail} "${tcpID}" "${currentHost}:${port}" ${add}
+        # if [[ "${coreInstallType}" = "3" || "${coreInstallType}" = "1" ]]
+        # then
+            # echoContent skyBlue "\n============================ VLESS TCP TLS/XTLS-origin ==========================="
+            # defaultBase64Code vlesstcp ${tcpEmail} "${tcpID}" "${currentHost}:${port}" ${add}
 
-            echoContent skyBlue "\n============================ VLESS TCP TLS/XTLS-direct ==========================="
-            defaultBase64Code vlesstcp ${tcpDirectEmail} "${tcpIDirect}" "${currentHost}:${port}" ${add}
+            # echoContent skyBlue "\n============================ VLESS TCP TLS/XTLS-direct ==========================="
+            # defaultBase64Code vlesstcp ${tcpDirectEmail} "${tcpIDirect}" "${currentHost}:${port}" ${add}
 
-        elif [[ "${coreInstallType}" = "2" ]]
-        then
-            echoContent skyBlue "\n============================ VLESS TCP TLS ======================================="
-            defaultBase64Code vlesstcp ${tcpEmail} "${tcpID}" "${currentHost}:${port}" ${add}
-        fi
+        # elif [[ "${coreInstallType}" = "2" ]]
+        # then
+            # echoContent skyBlue "\n============================ VLESS TCP TLS ======================================="
+            # defaultBase64Code vlesstcp ${tcpEmail} "${tcpID}" "${currentHost}:${port}" ${add}
+        # fi
 
-        echoContent skyBlue "\n================================ VLESS WS TLS CDN ================================"
-        defaultBase64Code vlessws ${vlessWSEmail} "${vlessWSID}" "${currentHost}:${port}" "${vlessWSPath}" ${CDNADD}
+        # echoContent skyBlue "\n================================ VLESS WS TLS CDN ================================"
+        # defaultBase64Code vlessws ${vlessWSEmail} "${vlessWSID}" "${currentHost}:${port}" "${vlessWSPath}" ${CDNADD}
 
         echoContent skyBlue "\n================================ VMess WS TLS CDN ================================"
         defaultBase64Code vmessws ${wsEmail} "${wsID}" "${currentHost}:${port}" "${wsPath}" ${CDNADD}
 
-        echoContent skyBlue "\n================================= VMess TCP TLS  ================================="
-        defaultBase64Code vmesstcp ${vmessTCPEmail} "${vmessTCPID}" "${currentHost}:${port}" "${vmessTCPath}" "${currentHost}"
+        # echoContent skyBlue "\n================================= VMess TCP TLS  ================================="
+        # defaultBase64Code vmesstcp ${vmessTCPEmail} "${vmessTCPID}" "${currentHost}:${port}" "${vmessTCPath}" "${currentHost}"
 
     elif [[ "${v2rayAgentInstallType}" = "2" ]]
     then
@@ -2943,14 +3067,16 @@ showAccounts(){
         local trojanUUID=`cat /etc/v2ray-agent/trojan/config_full.json |jq .password[0]|awk -F '["]' '{print $2}'`
         local trojanGoPath=`cat /etc/v2ray-agent/trojan/config_full.json|jq .websocket.path|awk -F '["]' '{print $2}'`
         local trojanGoAdd=`cat /etc/v2ray-agent/trojan/config_full.json|jq .websocket.add|awk -F '["]' '{print $2}'`
+        currentHost=${trojanGoAdd}
         echoContent skyBlue "\n==================================  Trojan TLS  =================================="
         defaultBase64Code trojan trojan ${trojanUUID} ${currentHost}
 
         echoContent skyBlue "\n================================  Trojan WS TLS   ================================"
-        if [[ -z ${trojanGoAdd} ]]
-        then
-            trojanGoAdd=${currentHost}
-        fi
+        echoContent skyBlue "current host : ${trojanGoAdd}"
+        # if [[ -z ${trojanGoAdd} ]]
+        # then
+            # trojanGoAdd=${currentHost}
+        # fi
         defaultBase64Code trojangows trojan ${trojanUUID} ${currentHost} ${trojanGoPath} ${trojanGoAdd}
     fi
     if [[ -z ${showStatus} ]]
@@ -3571,6 +3697,10 @@ v2rayCoreInstall(){
     installTools 2
     # 申请tls
     initTLSNginxConfig 3
+    
+    handleV2Ray stop
+    handleNginx start
+    
     installTLS 4
     handleNginx stop
     initNginxConfig 5
@@ -3617,19 +3747,19 @@ xrayCoreInstall(){
     installXrayService 8
     installTrojanGo 9
     installTrojanService 10
-    customCDNIP 11
+    # customCDNIP 11
     initXrayConfig all 12
     cleanUp v2rayDel
     initTrojanGoConfig 13
 #    installCronTLS 14
     nginxBlog 15
-    handleXray stop
-    sleep 2
-    handleXray start
+    # handleXray stop
+    # sleep 2
+    # handleXray start
 
     handleNginx start
-    handleTrojanGo stop
-    sleep 1
+    # handleTrojanGo stop
+    # sleep 1
     handleTrojanGo start
     # 生成账号
     checkGFWStatue 16
@@ -3659,13 +3789,75 @@ coreVersionManageMenu(){
         v2rayVersionManageMenu 1
     fi
 }
+
+# 更新伪装站
+updateNginxBlog() {
+    local nginxStaticPath=/usr/share/nginx/html/
+    echoContent skyBlue "\n进度 $1/${totalProgress} : 更换伪装站点"
+    echoContent red "=============================================================="
+    echoContent yellow "# 如需自定义，请手动复制模版文件到 ${nginxStaticPath} \n"
+    echoContent yellow "1.新手引导"
+    echoContent yellow "2.游戏网站"
+    echoContent yellow "3.个人博客01"
+    echoContent yellow "4.企业站"
+    echoContent yellow "5.解锁加密的音乐文件模版[https://github.com/ix64/unlock-music]"
+    echoContent yellow "6.mikutap[https://github.com/HFIProgramming/mikutap]"
+    echoContent yellow "7.企业站02"
+    echoContent yellow "8.个人博客02"
+    echoContent yellow "9.404自动跳转baidu"
+    echoContent red "=============================================================="
+    read -r -p "请选择:" selectInstallNginxBlogType
+
+    # if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
+        # echoContent red "\n=============================================================="
+        # echoContent yellow "重定向的优先级更高，配置302之后如果更改伪装站点，根路由下伪装站点将不起作用"
+        # echoContent yellow "如想要伪装站点实现作用需删除302重定向配置\n"
+        # echoContent yellow "1.添加"
+        # echoContent yellow "2.删除"
+        # echoContent red "=============================================================="
+        # read -r -p "请选择:" redirectStatus
+
+        # if [[ "${redirectStatus}" == "1" ]]; then
+            # backupNginxConfig backup
+            # read -r -p "请输入要重定向的域名,例如 https://www.baidu.com:" redirectDomain
+            # removeNginx302
+            # addNginx302 "${redirectDomain}"
+            # handleNginx stop
+            # handleNginx start
+            # if [[ -z $(pgrep -f "nginx") ]]; then
+                # backupNginxConfig restoreBackup
+                # handleNginx start
+                # exit 0
+            # fi
+            # checkNginx302
+            # exit 0
+        # fi
+        # if [[ "${redirectStatus}" == "2" ]]; then
+            # removeNginx302
+            # echoContent green " ---> 移除302重定向成功"
+            # exit 0
+        # fi
+    # fi
+    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
+        rm -rf "${nginxStaticPath}"
+
+        wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip" >/dev/null
+
+        unzip -o "${nginxStaticPath}html${selectInstallNginxBlogType}.zip" -d "${nginxStaticPath}" >/dev/null
+        rm -f "${nginxStaticPath}html${selectInstallNginxBlogType}.zip*"
+        echoContent green " ---> 更换伪站成功"
+    else
+        echoContent red " ---> 选择错误，请重新选择"
+        updateNginxBlog
+    fi
+}
+
 # 主菜单
 menu(){
     cd
     echoContent red "\n=============================================================="
-    echoContent green "作者：mack-a"
-    echoContent green "当前版本：v2.1.18"
-    echoContent green "Github：https://github.com/mack-a/v2ray-agent"
+    echoContent green "当前版本：v2.1.18.3 - 更新于2023/07/10"
+    echoContent green "原作者：Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "描述：七合一共存脚本"
     echoContent red "=============================================================="
     echoContent yellow "1.安装"
@@ -3676,14 +3868,15 @@ menu(){
     echoContent yellow "5.更新证书"
     echoContent yellow "6.更换CDN节点"
     echoContent yellow "7.重置uuid"
+    echoContent yellow "8.更换伪装站"
     echoContent skyBlue "-------------------------版本管理-----------------------------"
-    echoContent yellow "8.core版本管理"
-    echoContent yellow "9.升级Trojan-Go"
-    echoContent yellow "10.升级脚本"
-    echoContent yellow "11.安装BBR"
+    echoContent yellow "9.core版本管理"
+    echoContent yellow "10.升级Trojan-Go"
+    echoContent yellow "11.升级脚本"
+    echoContent yellow "12.安装BBR"
     echoContent skyBlue "-------------------------脚本管理-----------------------------"
-    echoContent yellow "12.查看日志"
-    echoContent yellow "13.卸载脚本"
+    echoContent yellow "13.查看日志"
+    echoContent yellow "14.卸载脚本"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
@@ -3710,21 +3903,24 @@ menu(){
             resetUUID 1
         ;;
         8)
-            coreVersionManageMenu 1
+            updateNginxBlog 1
         ;;
         9)
-            updateTrojanGo 1
+            coreVersionManageMenu 1
         ;;
         10)
-            updateV2RayAgent 1
+            updateTrojanGo 1
         ;;
         11)
-            bbrInstall
+            updateV2RayAgent 1
         ;;
         12)
-            checkLog 1
+            bbrInstall
         ;;
         13)
+            checkLog 1
+        ;;
+        14)
             unInstall 1
         ;;
     esac
