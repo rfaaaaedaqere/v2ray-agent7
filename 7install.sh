@@ -264,19 +264,19 @@ readConfigHostPathUUID(){
     currentUUIDDirect=
     currentHost=
     # currentPath
-    if [[ ! -z "${v2rayCoreConfigFilePath}" ]]
+    if [[ -n "${v2rayCoreConfigFilePath}" ]]
     then
         local path=`cat ${v2rayCoreConfigFilePath}|jq .inbounds[0].settings.fallbacks|jq -c '.[].path'|awk -F "[\"][/]" '{print $2}'|awk -F "[\"]" '{print $1}'|tail -n +2|head -n 1`
-        if [[ ! -z "${path}" ]]
+        if [[ -n "${path}" ]]
         then
             # currentPath=${path:0:4}
            [ "$path" == "*tcp" ] && currentPath=${path%%tcp} || currentPath=${path%%ws}
         fi
-    elif [[ ! -z "${xrayCoreConfigFilePath}" ]]
+    elif [[ -n "${xrayCoreConfigFilePath}" ]]
     then
         local path=$(jq -r -c '.inbounds[0].settings.fallbacks[]|select(.path)' ${xrayCoreConfigFilePath} | head -1| jq -r .path | awk -F "[/]" '{print $2}')
         # local path=`cat ${xrayCoreConfigFilePath}|jq .inbounds[0].settings.fallbacks|jq -c '.[].path'|awk -F "[\"][/]" '{print $2}'|awk -F "[\"]" '{print $1}'|tail -n +2|head -n 1`
-        if [[ ! -z "${path}" ]]
+        if [[ -n "${path}" ]]
         then
             [ "$path" == "*tcp" ] && currentPath=${path%%tcp} || currentPath=${path%%ws}
         fi
@@ -521,6 +521,7 @@ installTools(){
             echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
             echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
             echoContent skyBlue "  echo -e \"nameserver 2001:67c:2b0::4\\\nnameserver 2a00:1098:2c::1\" >> /etc/resolv.conf"
+            echoContent skyBlue "  echo -e \"或 DNS=2001:67c:2b0::4\\\nDNS=2001:67c:2b0::6\" >> /etc/systemd/resolved.conf"
             # exit 0
         fi
     fi
@@ -532,12 +533,15 @@ initTLSNginxConfig(){
     handleNginx stop
     echoContent skyBlue "\n进度  $1/${totalProgress} : 初始化Nginx申请证书配置"
     if [[ -n "${currentHost}" ]]; then
-        read -r -p "读取到上次安装记录，是否使用上次安装时的域名 ${currentHost} ？[y/N]:" historyDomainStatus
-        if [ "${historyDomainStatus}" == "y" -o "${historyDomainStatus}" == "Y" ]; then
+        echo
+        read -r -p "读取到上次安装记录，是否使用上次安装时的域名 ${currentHost} ？[Y/n]:" historyDomainStatus
+        historyDomainStatus=$(echo "$historyDomainStatus" | xargs)
+        if [ "${historyDomainStatus}" == "" -o "${historyDomainStatus}" == "y" -o "${historyDomainStatus}" == "Y" ]; then
             domain=${currentHost}
             echoContent yellow "\n ---> 域名: ${domain}"
         fi
-    else
+    fi
+    if [[ -z ${domain} ]]; then
         echo
         echoContent yellow "请输入要配置的域名 例: www.v2ray-agent.com --->"
         read -r -p "域名:" domain
@@ -619,9 +623,16 @@ installTLS(){
         
         local interfaces=("eth0" "eth1" "venet0")
         for iface in "${interfaces[@]}"; do
-            local_ip=$(ip -6 addr show dev $iface | grep -v dynamic | grep inet6 | awk -F '[ \t]+|/' '$3 == "::1" { next;} $3 ~ /^fe80::/ { next;} /inet6/ {print $3}' | head -n 1) > /dev/null 2>&1
+            local_ip=$(ip -6 addr show dev $iface 2>/dev/null | grep -v dynamic | grep inet6 | awk -F '[ \t]+|/' '$3 == "::1" { next;} $3 ~ /^fe80::/ { next;} /inet6/ {print $3}' | head -n 1) > /dev/null 2>&1
             [ -n "$local_ip" ] && echo " $LINENO, local_ip=${local_ip}" && break
         done
+        if [ -n "$local_ip" ]; then
+            interfaces=("ens5")
+            for iface in "${interfaces[@]}"; do
+                local_ip=$(ip -6 addr show dev $iface 2>/dev/null | grep inet6 | awk -F '[ \t]+|/' '$3 == "::1" { next;} $3 ~ /^fe80::/ { next;} /inet6/ {print $3}' | head -n 1)
+                [ -n "$local_ip" ] && echo " $LINENO, local_ip=${local_ip}" && break
+            done
+        fi
         if [ -n "$local_ip" ] && echo "${local_ip}" | grep -q ":"; then
             grep -q "^nameserver 2606:4700:4700::1111" /etc/resolv.conf || (sudo sed -i '1s/^/nameserver 2606:4700:4700::1111\n/' /etc/resolv.conf && sudo systemctl restart systemd-resolved)
             grep -q "^nameserver 2001:4860:4860::8844" /etc/resolv.conf || (sudo sed -i '1s/^/nameserver 2001:4860:4860::8844\n/' /etc/resolv.conf && sudo systemctl restart systemd-resolved)
@@ -634,6 +645,8 @@ installTLS(){
             sudo "$HOME/.acme.sh/acme.sh" --issue -d "${domain}" --standalone -k ec-256 --server letsencrypt | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
         fi
         sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath "/etc/v2ray-agent/tls/${domain}.crt" --keypath "/etc/v2ray-agent/tls/${domain}.key" --ecc >/dev/null
+        [ -d "$HOME/naive/tls/${domain}/bak" ] || mkdir -p "$HOME/naive/tls/${domain}/bak"
+        sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath "$HOME/naive/tls/${domain}/${domain}.crt" --keypath "$HOME/naive/tls/${domain}/${domain}.key" --ecc >/dev/null
 
         if [[ -z `cat /etc/v2ray-agent/tls/${domain}.crt` ]]
         then
@@ -703,17 +716,16 @@ randomPathFunction(){
     if [[ ! -z "${currentPath}" ]]
     then
         echo
-        read -p "读取到上次安装记录，是否使用上次安装时的path路径 ${currentPath} ？[y/N]:" historyPathStatus
-        echo
+        read -p "读取到上次安装记录，是否使用上次安装时的path路径 ${currentPath} ？[Y/n]:" historyPathStatus
+        historyPathStatus=$(echo "$historyPathStatus" | xargs)
+        # echo
     fi
 
-    if [[ "${historyPathStatus}" = "y" ]]
-    then
+    if [ "${historyPathStatus}" == "" -o "${historyPathStatus}" = "y" -o "${historyPathStatus}" = "y" ]; then
         customPath=${currentPath}
         echoContent green " ---> 使用成功\n"
     else
         initRandomPath
-        # currentPath=${customPath}
         echoContent yellow "请输入自定义路径[例: alone]，不需要斜杠，[回车]默认随机路径 ${customPath} :"
         read -p '路径:' currentPath
         if [[ -n "${currentPath}" ]]
@@ -753,8 +765,8 @@ nginxBlog(){
 # 操作Nginx
 handleNginx(){
     if [[ -z $(pgrep -f "nginx") ]] && [[ "$1" == "start" ]]; then
-        sudo kill $(sudo lsof -t -i:80) > /dev/null 2>&1
-        sudo systemctl disable apache2 > /dev/null 2>&1
+        netstat -tlupn | grep -i :80 | awk -F " " '{print $7}' | awk -F / '{print $1}' | xargs kill -9 > /dev/null 2>&1
+        systemctl disable apache2 > /dev/null 2>&1
         systemctl start nginx 2>/etc/v2ray-agent/nginx_error.log
 
         sleep 0.5
@@ -1402,10 +1414,12 @@ checkGFWStatue(){
     echoContent skyBlue "\n进度 $1/${totalProgress} : 验证服务启动状态"
     if [[ ! -z `ps -ef|grep -v grep|grep v2ray` ]]
     then
-        echoContent green " ---> 服务启动成功"
+        echoContent green " ---> v2ray 服务启动成功"
+    elif [[ ! -z `ps -ef|grep -v grep|grep xray` ]]; then
+        echoContent green " ---> Xray 服务启动成功"
     else
         echoContent red " ---> 服务启动失败，请检查终端是否有日志打印"
-        exit 0
+        # exit 0
     fi
 }
 
@@ -1595,27 +1609,27 @@ handleXray(){
     if [[ ! -z `find /bin /usr/bin -name "systemctl"` ]] && [[ ! -z `ls /etc/systemd/system/|grep -v grep|grep xray.service` ]]; then
         if [[ -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "start" ]]; then
             
-            if [[ -f $xray_access_log ]]; then
+            # if [[ -f $xray_access_log ]]; then
             
-                while true
-                do
-                    echoContent yellow "\n --> 正在取消 $v2ray_access_log 只读属性"
-                    sudo chattr -i $xray_access_log
-                    sudo chattr -i $xray_error_log
+                # while true
+                # do
+                    # echoContent yellow "\n --> 正在取消 $v2ray_access_log 只读属性"
+                    # sudo chattr -i $xray_access_log
+                    # sudo chattr -i $xray_error_log
                     
-                    sleep 0.5
+                    # sleep 0.5
                     
-                    if lsattr $xray_access_log | grep '\-i'; then
-                        sleep 1
-                        continue
-                    else
-                        echoContent yellow "\n --> 已取消 $xray_access_log 只读属性"
-                        echo >$xray_access_log
-                        echo >$xray_error_log
-                        break
-                    fi
-                done                
-            fi
+                    # if lsattr $xray_access_log | grep '\-i'; then
+                        # sleep 1
+                        # continue
+                    # else
+                        # echoContent yellow "\n --> 已取消 $xray_access_log 只读属性"
+                        # echo >$xray_access_log
+                        # echo >$xray_error_log
+                        # break
+                    # fi
+                # done                
+            # fi
         
             systemctl start xray.service
         elif [[ ! -z `ps -ef|grep -v grep|grep "xray/xray"` ]] && [[ "$1" = "stop" ]]; then
@@ -1634,9 +1648,9 @@ handleXray(){
         if [[ ! -z `ps -ef|grep -v grep|grep "xray/xray"` ]]
         then
             echoContent green " ---> Xray启动成功"
-            echoContent yellow "\n --> 已恢复 $xray_access_log 只读属性"
-            sudo chattr +i $xray_access_log 
-            sudo chattr +i $xray_error_log 
+            # echoContent yellow "\n --> 已恢复 $xray_access_log 只读属性"
+            # sudo chattr +i $xray_access_log 
+            # sudo chattr +i $xray_error_log 
         else
             echoContent red "xray启动失败"
             echoContent red "执行 [ps -ef|grep xray] 查看日志"
@@ -1697,14 +1711,15 @@ handleTrojanGo(){
         fi
     fi
 }
+
 # 初始化V2Ray 配置文件
 initV2RayConfig(){
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化V2Ray配置"
     if [[ ! -z "${currentUUID}" ]]; then
         echo
-        read -p "读取到上次安装记录，是否使用上次安装时的UUID ${currentUUID} ？[y/N]:" historyUUIDStatus
-        if [[ "${historyUUIDStatus}" = "y" ]]
-        then
+        read -p "读取到上次安装记录，是否使用上次安装时的UUID ${currentUUID} ？[Y/n]:" historyUUIDStatus
+        historyUUIDStatus=$(echo "$historyUUIDStatus" | xargs)
+        if [ "${historyUUIDStatus}" == "" -o "${historyUUIDStatus}" = "Y" -o "${historyUUIDStatus}" = "y" ]; then
             uuid=${currentUUID}
             uuidDirect=${currentUUIDDirect}
         fi
@@ -2377,18 +2392,17 @@ EOF
         fi
 
     fi
-}
-
-
+}       
+        
 # 初始化Xray 配置文件
 initXrayConfig(){
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化Xray配置"
     if [[ ! -z "${currentUUID}" ]]
     then
         echo
-        read -p "读取到上次安装记录，是否使用上次安装时的UUID ${currentUUID} ？[y/N]:" historyUUIDStatus
-        if [[ "${historyUUIDStatus}" = "y" ]]
-        then
+        read -p "读取到上次安装记录，是否使用上次安装时的UUID ${currentUUID} ？[Y/n]:" historyUUIDStatus
+        historyUUIDStatus=$(echo "$historyUUIDStatus" | xargs)
+        if [ "${historyUUIDStatus}" = "" -o "${historyUUIDStatus}" = "Y" -o "${historyUUIDStatus}" = "y" ]; then
             uuid=${currentUUID}
             uuidDirect=${currentUUIDDirect}
         fi
@@ -3016,14 +3030,14 @@ defaultBase64Code(){
     elif [[ "${type}" = "trojangows" ]]
     then
         # URLEncode
-        echoContent yellow " ---> Trojan-Go(WS+TLS) Shadowrocket / v2rayN"
+        echoContent yellow " ---> Trojan-Go(WS+TLS) NekoRay / v2rayN / Shadowrocket"
         # echoContent green "    trojan://${id}@${add}:${port}?allowInsecure=0&&peer=${host}&sni=${host}&plugin=obfs-local;obfs=websocket;obfs-host=${host};obfs-uri=${path}#${host}_trojan_ws\n"
         echoContent green "    trojan://${id}@${host}:${port}?allowInsecure=0&peer=${host}&sni=${host}&plugin=obfs-local&type=ws&host=${host}&path=${path}#${host}_tr_ws\n"
         # echoContent yellow " ---> 二维码 Trojan-Go(WS+TLS) Shadowrocket"
         # echoContent green "https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${add}%3a${port}%3fallowInsecure%3d0%26peer%3d${host}%26plugin%3dobfs-local%3bobfs%3dwebsocket%3bobfs-host%3d${host}%3bobfs-uri%3d${path}%23${host}_trojan_ws\n"
 
         path=`echo ${path}|awk -F "[/]" '{print $2}'`
-        echoContent yellow " ---> Trojan-Go(WS+TLS) QV2ray"
+        echoContent yellow " ---> Trojan-Go(WS+TLS) Qv2ray"
         # echoContent green "    trojan-go://${id}@${add}:${port}?sni=${host}&type=ws&host=${host}&path=%2F${path}#${host}_trojan_ws\n"
         echoContent green "    trojan-go://${id}@${currentHost}:${port}?sni=${currentHost}&type=ws&host=${currentHost}&path=%2F${path}#${host}_trg_ws\n"
     fi
